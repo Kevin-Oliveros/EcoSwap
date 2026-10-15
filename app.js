@@ -1,12 +1,12 @@
 /* =====================================================================
    ECO SWAP · Plataforma funcional de economía circular para RAEE
-   Equipo: Alejandro Muñoz, Kevin Oliveros, Daniel Pinilla
+   Equipo: Alejandro Muñoz, Kevin Oliveros, Daniela Cubides, Samuel Ladino
    Demo 100% en el navegador: los datos se guardan en localStorage.
    ===================================================================== */
 'use strict';
 
-const DB_KEY = 'ecoswap_db_v2';
-const SESSION_KEY = 'ecoswap_session_v2';
+const DB_KEY = 'ecoswap_db_v3';
+const SESSION_KEY = 'ecoswap_session_v3';
 const SYS = 'u0'; // usuario "Eco Swap" (sistema / Eco-Hubs)
 
 /* ---------------------------- CATÁLOGOS ---------------------------- */
@@ -171,7 +171,8 @@ function seed() {
       { id: 'u2', name: 'Taller Don Jorge', role: 'tecnico', loc: 'Kennedy', coins: 800, interests: ['placa', 'fuente', 'disco', 'ram', 'laptop'] },
       { id: 'u3', name: 'Kevin Oliveros', role: 'estudiante', loc: 'Teusaquillo', coins: 450, interests: ['ram', 'disco', 'placa', 'fuente'] },
       { id: 'u6', name: 'Alejandro Muñoz', role: 'estudiante', loc: 'Suba', coins: 380, interests: ['laptop', 'monitor', 'ram'] },
-      { id: 'u7', name: 'Daniel Pinilla', role: 'tecnico', loc: 'Engativá', coins: 520, interests: ['celular', 'tablet', 'placa'] },
+      { id: 'u7', name: 'Daniela Cubides', role: 'estudiante', loc: 'Engativá', coins: 520, interests: ['celular', 'tablet', 'placa'] },
+      { id: 'u8', name: 'Samuel Ladino', role: 'estudiante', loc: 'Fontibón', coins: 410, interests: ['perifericos', 'monitor', 'disco'] },
       { id: 'u4', name: 'Pedro Ramírez', role: 'reciclador', loc: 'Engativá', coins: 120, interests: [] },
       { id: 'u5', name: 'Operador Hub Andino', role: 'operador', loc: 'Chapinero', coins: 0, interests: [], hub: 'h1' }
     ]
@@ -192,7 +193,7 @@ function seed() {
   mk(SYS, 'monitor', 'Monitor 22" (reacondicionado)', 'Samsung', 2019, 'funcional', 'mercado', { desc: 'Reacondicionado en Eco-Hub Andino.', donor: 'u1' });
   mk(SYS, 'placa', 'Tarjeta madre H110 para prácticas', 'Gigabyte', 2017, 'reparable', 'mercado', { desc: 'Ideal para laboratorio de hardware.' });
   mk('u6', 'celular', 'Moto G7 con pantalla rota', 'Motorola', 2020, 'reparable', 'mercado', { desc: 'Placa funcional, cambiar display.' });
-  mk('u7', 'perifericos', 'Combo teclado + mouse USB', 'Genius', 2019, 'funcional', 'mercado');
+  mk('u8', 'perifericos', 'Combo teclado + mouse USB', 'Genius', 2019, 'funcional', 'mercado');
   mk('u7', 'tablet', 'Tablet Galaxy Tab A 8"', 'Samsung', 2019, 'funcional', 'mercado', { desc: 'Batería dura 4 horas.' });
   // Pedido pendiente de la Familia Gómez
   const t1 = mk('u1', 'tablet', 'Tablet vieja que no carga', 'Lenovo', 2015, 'danado', 'en_ruta');
