@@ -1,13 +1,18 @@
 /* =====================================================================
    ECO SWAP · Plataforma funcional de economía circular para RAEE
    Equipo: Alejandro Muñoz, Kevin Oliveros, Daniela Cubides, Samuel Ladino
-   Demo 100% en el navegador: los datos se guardan en localStorage.
+   Conectada a Supabase (PostgreSQL + Auth + Realtime) y PWA instalable.
    ===================================================================== */
 'use strict';
 
-const DB_KEY = 'ecoswap_db_v3';
-const SESSION_KEY = 'ecoswap_session_v3';
+const DB_KEY = 'ecoswap_db_v4';
+const SESSION_KEY = 'ecoswap_session_v4';
+const GEMINI_KEY_STORAGE = 'ecoswap_gemini_key';
 const SYS = 'u0'; // usuario "Eco Swap" (sistema / Eco-Hubs)
+
+const SUPABASE_URL = 'https://zsjjgomptpomxzljntcc.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpzampnb21wdHBvbXh6bGpudGNjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ0MzU1OTksImV4cCI6MjExMDAxMTU5OX0.KnSXnw_Tl31G4g71QZaK1uyB1j1_Sv5hVoaaJS7szqQ';
+const sb = (typeof window !== 'undefined' && window.supabase) ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 /* ---------------------------- CATÁLOGOS ---------------------------- */
 const CATS = {
@@ -75,7 +80,39 @@ const ORDER_STEPS = [
 
 /* ------------------------------ ESTADO ----------------------------- */
 let db = null, session = null, view = 'inicio', charts = [], leafMap = null, draft = null;
+let authMode = 'login', authLoading = false, syncStatus = 'connecting', deferredInstallPrompt = null, realtimeChannel = null;
 const ui = { market: { q: '', cat: '', cond: '', hideMine: false }, route: null, routeHub: null };
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    const btn = $('#pwa-install-btn');
+    if (btn) btn.classList.remove('hidden');
+  });
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    });
+  }
+}
+
+async function installPWA() {
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    const { outcome } = await deferredInstallPrompt.userChoice;
+    if (outcome === 'accepted') { deferredInstallPrompt = null; toast('¡Instalando Eco Swap en tu dispositivo!', 'ok'); }
+  } else {
+    openModal(`<h2 class="text-xl font-bold mb-2"><i class="fa-solid fa-mobile-screen-button text-emerald-600 mr-2"></i>Instalar App Eco Swap</h2>
+      <p class="text-sm text-slate-600 mb-3">Puedes instalar Eco Swap en tu celular o computador como una aplicación nativa:</p>
+      <ul class="text-sm text-slate-600 space-y-2 mb-4">
+        <li><b>📱 Android (Chrome):</b> Toca el menú <b>⋮</b> (arriba a la derecha) y selecciona <b>"Instalar aplicación"</b> o <b>"Agregar a la pantalla principal"</b>.</li>
+        <li><b>🍎 iPhone / iPad (Safari):</b> Toca el botón <b>Compartir</b> <i class="fa-solid fa-arrow-up-from-bracket"></i> y elige <b>"Agregar a inicio"</b>.</li>
+        <li><b>💻 PC (Chrome / Edge):</b> Haz clic en el ícono de instalar <i class="fa-solid fa-download"></i> en la barra de direcciones.</li>
+      </ul>
+      <button onclick="closeModal()" class="btn btn-primary w-full">Entendido</button>`);
+  }
+}
 
 /* ----------------------------- UTILIDADES -------------------------- */
 const $ = s => document.querySelector(s);
@@ -83,14 +120,40 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const fmt = n => Math.round(n || 0).toLocaleString('es-CO');
 const fmt1 = n => (n || 0).toLocaleString('es-CO', { maximumFractionDigits: 1 });
 const fdate = ts => new Date(ts).toLocaleString('es-CO', { dateStyle: 'medium', timeStyle: 'short' });
-const user = id => db.users.find(u => u.id === id);
+const user = id => db.users.find(u => u.id === id) || { id: id || 'u0', name: 'Usuario EcoSwap', role: 'estudiante', loc: 'Chapinero', coins: 0, interests: [] };
 const item = id => db.items.find(i => i.id === id);
-const hub = id => HUBS.find(h => h.id === id);
-const me = () => session ? user(session) : null;
+const hub = id => HUBS.find(h => h.id === id) || HUBS[0];
+const me = () => (session && db && db.users) ? db.users.find(u => u.id === session) : null;
 const nid = p => p + (++db.seq);
 const coin = n => `<span class="font-bold text-emerald-700 whitespace-nowrap">🪙 ${fmt(n)}</span>`;
 
-function save() { localStorage.setItem(DB_KEY, JSON.stringify(db)); }
+let saveTimer = null;
+function save() {
+  if (!db) return;
+  db.updatedAt = Date.now();
+  try { localStorage.setItem(DB_KEY, JSON.stringify(db)); } catch (e) {}
+  if (!sb) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try {
+      const { error } = await sb.from('ecoswap_state').upsert({ id: 'main', data: db, updated_at: new Date().toISOString() });
+      if (!error) setSyncBadge('online');
+    } catch (e) {}
+  }, 120);
+}
+
+function setSyncBadge(st) {
+  syncStatus = st;
+  const el = $('#sync-badge');
+  if (!el) return;
+  if (st === 'online') {
+    el.className = 'hidden sm:inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200';
+    el.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>En vivo · Nube';
+  } else {
+    el.className = 'hidden sm:inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200';
+    el.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-500"></span>Sincronizando…';
+  }
+}
 function hav(a, b) { // km (haversine × 1.3 factor vial urbano)
   const R = 6371, r = x => x * Math.PI / 180;
   const dLa = r(b.lat - a.lat), dLo = r(b.lng - a.lng);
@@ -219,27 +282,207 @@ function seed() {
 }
 
 /* ------------------------------ ARRANQUE ---------------------------- */
-function boot() {
+function subscribeRealtime() {
+  if (!sb || realtimeChannel) return;
+  realtimeChannel = sb.channel('ecoswap_live')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'ecoswap_state', filter: 'id=eq.main' }, payload => {
+      if (payload.new && payload.new.data) {
+        const incoming = payload.new.data;
+        if (!db || !incoming.updatedAt || incoming.updatedAt !== db.updatedAt) {
+          db = incoming;
+          try { localStorage.setItem(DB_KEY, JSON.stringify(db)); } catch (e) {}
+          const active = document.activeElement;
+          const isTyping = active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName);
+          if (!isTyping && !$('#modal-root').innerHTML && view !== 'escanear') {
+            render();
+          }
+        }
+      }
+    })
+    .subscribe(status => {
+      if (status === 'SUBSCRIBED') setSyncBadge('online');
+    });
+}
+
+async function resolveProfileForAuthUser(authUser, extraMeta = {}) {
+  if (!sb || !authUser) return null;
+  let { data: prof } = await sb.from('ecoswap_profiles').select('*').eq('auth_id', authUser.id).maybeSingle();
+  const meta = Object.assign({}, authUser.user_metadata || {}, extraMeta);
+  if (!prof) {
+    const uid = meta.uid || ('u_' + authUser.id.replace(/-/g, '').slice(0, 8));
+    const newProf = {
+      auth_id: authUser.id,
+      user_id: uid,
+      email: authUser.email,
+      name: (meta.name || authUser.email.split('@')[0]).trim(),
+      role: meta.role || 'estudiante',
+      loc: meta.loc || 'Chapinero',
+      hub: (meta.role === 'operador') ? (meta.hub || 'h1') : null
+    };
+    const res = await sb.from('ecoswap_profiles').upsert(newProf).select('*').maybeSingle();
+    prof = res.data || newProf;
+  }
+  let u = db.users.find(x => x.id === prof.user_id);
+  if (!u) {
+    u = {
+      id: prof.user_id,
+      email: prof.email,
+      name: prof.name,
+      role: prof.role || 'estudiante',
+      loc: prof.loc || 'Chapinero',
+      coins: 0,
+      interests: Array.isArray(meta.interests) ? meta.interests : [],
+      hub: prof.hub || (prof.role === 'operador' ? 'h1' : undefined)
+    };
+    db.users.push(u);
+    addTx(SYS, u.id, 100, 'Bono de bienvenida');
+    save();
+  } else {
+    u.email = prof.email;
+    if (prof.name) u.name = prof.name;
+    if (prof.role) u.role = prof.role;
+    if (prof.loc) u.loc = prof.loc;
+    if (prof.hub) u.hub = prof.hub;
+  }
+  return u;
+}
+
+async function boot() {
   try { db = JSON.parse(localStorage.getItem(DB_KEY)); } catch (e) { db = null; }
   if (!db || !db.users) seed();
-  session = localStorage.getItem(SESSION_KEY);
-  if (session && !user(session)) session = null;
+
+  if (sb) {
+    try {
+      const { data: row } = await sb.from('ecoswap_state').select('data').eq('id', 'main').maybeSingle();
+      if (row && row.data && row.data.users) {
+        db = row.data;
+        try { localStorage.setItem(DB_KEY, JSON.stringify(db)); } catch (e) {}
+      } else {
+        seed();
+      }
+      setSyncBadge('online');
+      subscribeRealtime();
+      const { data: sessData } = await sb.auth.getSession();
+      if (sessData && sessData.session && sessData.session.user) {
+        const u = await resolveProfileForAuthUser(sessData.session.user);
+        if (u) {
+          session = u.id;
+          localStorage.setItem(SESSION_KEY, u.id);
+        }
+      } else {
+        session = null;
+        localStorage.removeItem(SESSION_KEY);
+      }
+    } catch (e) {
+      session = localStorage.getItem(SESSION_KEY);
+      if (session && !db.users.find(u => u.id === session)) session = null;
+    }
+  } else {
+    session = localStorage.getItem(SESSION_KEY);
+    if (session && !db.users.find(u => u.id === session)) session = null;
+  }
   render();
 }
-function login(id) { session = id; localStorage.setItem(SESSION_KEY, id); view = navFor(user(id).role)[0][0]; render(); toast(`Bienvenido, ${user(id).name}`, 'ok'); }
-function logout() { session = null; localStorage.removeItem(SESSION_KEY); ui.route = null; render(); }
-function register(e) {
-  e.preventDefault();
-  const f = new FormData(e.target);
-  const u = { id: nid('u'), name: f.get('name').trim(), role: f.get('role'), loc: f.get('loc'), coins: 0, interests: f.getAll('interests') };
-  if (!u.name) return;
-  db.users.push(u);
-  addTx(SYS, u.id, 100, 'Bono de bienvenida');
-  save(); login(u.id);
+
+function setAuthMode(m) {
+  authMode = m;
+  render();
 }
-function resetDemo() {
-  if (!confirm('¿Reiniciar todos los datos de la demo?')) return;
-  localStorage.removeItem(DB_KEY); localStorage.removeItem(SESSION_KEY); location.reload();
+
+async function handleSignIn(e) {
+  e.preventDefault();
+  if (authLoading) return;
+  const f = new FormData(e.target);
+  const email = (f.get('email') || '').trim().toLowerCase();
+  const password = f.get('password') || '';
+  if (!email || !password) return;
+  if (!sb) return toast('No hay conexión con el servidor de autenticación', 'err');
+  authLoading = true;
+  const btn = $('#auth-submit-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>Iniciando sesión…'; }
+  try {
+    const { data, error } = await sb.auth.signInWithPassword({ email, password });
+    if (error) {
+      toast(error.message === 'Invalid login credentials' ? 'Correo o contraseña incorrectos' : error.message, 'err');
+      return;
+    }
+    const u = await resolveProfileForAuthUser(data.user);
+    session = u.id;
+    localStorage.setItem(SESSION_KEY, u.id);
+    view = navFor(u.role)[0][0];
+    save();
+    render();
+    toast(`¡Bienvenido, ${u.name}!`, 'ok');
+  } finally {
+    authLoading = false;
+    if ($('#auth-submit-btn')) { $('#auth-submit-btn').disabled = false; $('#auth-submit-btn').innerHTML = '<i class="fa-solid fa-right-to-bracket"></i>Iniciar sesión'; }
+  }
+}
+
+async function register(e) {
+  e.preventDefault();
+  if (authLoading) return;
+  const f = new FormData(e.target);
+  const name = (f.get('name') || '').trim();
+  const email = (f.get('email') || '').trim().toLowerCase();
+  const password = f.get('password') || '';
+  const role = f.get('role') || 'estudiante';
+  const loc = f.get('loc') || 'Chapinero';
+  const hubSel = role === 'operador' ? (f.get('hub') || 'h1') : null;
+  const interests = f.getAll('interests');
+  if (!name || !email || password.length < 6) {
+    return toast('Completa todos los campos (contraseña mínimo 6 caracteres)', 'warn');
+  }
+  if (!sb) return toast('No hay conexión con el servidor', 'err');
+  authLoading = true;
+  const btn = $('#auth-submit-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>Creando cuenta…'; }
+  try {
+    const { data, error } = await sb.auth.signUp({
+      email,
+      password,
+      options: { data: { name, role, loc, hub: hubSel, interests } }
+    });
+    if (error) {
+      toast(error.message.includes('already registered') ? 'Este correo ya está registrado. Inicia sesión.' : error.message, 'err');
+      return;
+    }
+    let authUser = data.user;
+    if (!data.session) {
+      const signRes = await sb.auth.signInWithPassword({ email, password });
+      if (signRes.data && signRes.data.user) authUser = signRes.data.user;
+    }
+    const u = await resolveProfileForAuthUser(authUser, { name, role, loc, hub: hubSel, interests });
+    session = u.id;
+    localStorage.setItem(SESSION_KEY, u.id);
+    view = navFor(u.role)[0][0];
+    save();
+    render();
+    toast(`¡Cuenta creada! Recibiste +100 EcoCoins de bienvenida, ${u.name}`, 'ok');
+  } finally {
+    authLoading = false;
+    if ($('#auth-submit-btn')) { $('#auth-submit-btn').disabled = false; $('#auth-submit-btn').innerHTML = '<i class="fa-solid fa-user-plus"></i>Crear cuenta (+100 EcoCoins)'; }
+  }
+}
+
+async function logout() {
+  if (sb) { try { await sb.auth.signOut(); } catch (e) {} }
+  session = null;
+  localStorage.removeItem(SESSION_KEY);
+  ui.route = null;
+  render();
+}
+
+async function resetDemo() {
+  if (!confirm('¿Restaurar los datos iniciales del ecosistema en la nube?')) return;
+  const curId = session;
+  seed();
+  if (sb) {
+    try { await sb.rpc('reset_ecoswap_state', { new_data: db }); } catch (e) {}
+  }
+  session = curId;
+  render();
+  toast('Datos del ecosistema restaurados y sincronizados en la nube', 'ok');
 }
 
 /* ------------------------- UI: toast y modales ---------------------- */
@@ -323,20 +566,22 @@ function render() {
         <div><div class="font-extrabold text-lg leading-tight"><span class="text-emerald-600">ECO</span> <span class="text-sky-700">SWAP</span></div><div class="text-[11px] text-slate-400">Economía circular RAEE</div></div>
       </div>
       <nav class="p-3 space-y-1 flex-1 overflow-y-auto">${nav.map(link).join('')}</nav>
-      <div class="p-3 border-t border-slate-100">
+      <div class="p-3 border-t border-slate-100 space-y-1">
         <div class="flex items-center gap-3 p-2">${avatar(u)}<div class="min-w-0 flex-1"><div class="font-semibold text-sm truncate">${esc(u.name)}</div><div class="text-[11px] text-slate-500 truncate">${ROLES[u.role].n}</div></div></div>
-        <button onclick="logout()" class="nav-link text-sm"><i class="fa-solid fa-right-from-bracket w-5"></i>Cambiar de usuario</button>
-        <button onclick="resetDemo()" class="nav-link text-xs text-slate-400"><i class="fa-solid fa-rotate-left w-5"></i>Reiniciar demo</button>
+        <button onclick="installPWA()" id="pwa-install-btn" class="nav-link text-sm text-emerald-700 font-semibold"><i class="fa-solid fa-mobile-screen-button w-5"></i>Instalar App</button>
+        <button onclick="logout()" class="nav-link text-sm"><i class="fa-solid fa-right-from-bracket w-5"></i>Cerrar sesión</button>
+        <button onclick="resetDemo()" class="nav-link text-xs text-slate-400"><i class="fa-solid fa-rotate-left w-5"></i>Restaurar datos base</button>
       </div>
     </aside>
     <div class="flex-1 flex flex-col min-w-0">
       <header class="bg-white/90 backdrop-blur border-b border-slate-200 px-4 md:px-8 py-3 flex items-center justify-between sticky top-0 z-[900]">
         <div class="flex items-center gap-2 md:hidden"><i class="fa-solid fa-recycle text-emerald-600 text-xl"></i><span class="font-extrabold">ECO SWAP</span></div>
-        <div class="hidden md:block text-sm text-slate-500"><i class="fa-solid fa-location-dot mr-1"></i>Bogotá · ${esc(u.loc)}</div>
-        <div class="flex items-center gap-3">
+        <div class="hidden md:flex items-center gap-3 text-sm text-slate-500"><span><i class="fa-solid fa-location-dot mr-1"></i>Bogotá · ${esc(u.loc)}</span><span id="sync-badge" class="hidden sm:inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200"><span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>En vivo · Nube</span></div>
+        <div class="flex items-center gap-2 md:gap-3">
           ${u.role !== 'operador' ? `<button onclick="go('billetera')" class="bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1.5 text-sm">${coin(u.coins)} <span class="text-emerald-700 text-xs">EcoCoins</span></button>` : `<span class="text-sm font-semibold text-slate-600"><i class="fa-solid fa-warehouse mr-1"></i>${hub(u.hub).n}</span>`}
+          <button onclick="installPWA()" class="md:hidden w-10 h-10 rounded-full hover:bg-slate-100 text-emerald-600" title="Instalar App"><i class="fa-solid fa-download"></i></button>
           <button onclick="showNotifs()" class="relative w-10 h-10 rounded-full hover:bg-slate-100"><i class="fa-solid fa-bell text-slate-600"></i>${unread ? `<span class="absolute top-1 right-1 bg-rose-500 text-white text-[10px] rounded-full min-w-4 h-4 px-1 flex items-center justify-center">${unread}</span>` : ''}</button>
-          <button onclick="logout()" class="md:hidden w-10 h-10 rounded-full hover:bg-slate-100"><i class="fa-solid fa-right-from-bracket"></i></button>
+          <button onclick="logout()" class="md:hidden w-10 h-10 rounded-full hover:bg-slate-100" title="Cerrar sesión"><i class="fa-solid fa-right-from-bracket"></i></button>
         </div>
       </header>
       <main class="p-4 md:p-8 pb-28 md:pb-10 flex-1 fade-in max-w-7xl w-full mx-auto">${VIEWS[view](u)}</main>
@@ -359,7 +604,7 @@ function showNotifs() {
 
 /* ------------------------------- LOGIN ------------------------------ */
 function loginView() {
-  const demo = db.users.filter(u => u.role !== 'sistema');
+  const isLogin = authMode === 'login';
   return `
   <div class="min-h-screen bg-gradient-to-br from-emerald-600 via-emerald-700 to-sky-800 flex items-center justify-center p-4">
     <div class="bg-white rounded-3xl shadow-2xl max-w-5xl w-full grid md:grid-cols-2 overflow-hidden fade-in">
@@ -374,24 +619,67 @@ function loginView() {
           <li><i class="fa-solid fa-warehouse text-emerald-600 w-6"></i>Eco-Hubs: triage, borrado seguro y tóxicos</li>
           <li><i class="fa-solid fa-cube text-emerald-600 w-6"></i>Repuestos con impresión 3D</li>
         </ul>
-        <p class="text-[11px] text-slate-400 mt-8">Ingeniería de Sistemas + Ingeniería Industrial · Bogotá</p>
-      </div>
-      <div class="p-8 md:p-10">
-        <h2 class="text-xl font-bold">Ingresar con una cuenta demo</h2>
-        <p class="text-sm text-slate-500 mb-4">Cada perfil muestra un rol diferente del ecosistema.</p>
-        <div class="space-y-2 max-h-80 overflow-y-auto pr-1">
-          ${demo.map(u => `<button onclick="login('${u.id}')" class="w-full flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-emerald-500 hover:bg-emerald-50 text-left transition">${avatar(u)}<div class="flex-1"><div class="font-semibold">${esc(u.name)}</div><div class="text-xs text-slate-500"><i class="fa-solid ${ROLES[u.role].icon} mr-1"></i>${ROLES[u.role].n} · ${esc(u.loc)}</div></div><i class="fa-solid fa-arrow-right text-slate-300"></i></button>`).join('')}
+        <div class="mt-6 flex items-center justify-between">
+          <p class="text-[11px] text-slate-400">Ingeniería de Sistemas + Ingeniería Industrial · Bogotá</p>
+          <button type="button" onclick="installPWA()" class="text-xs font-semibold text-emerald-700 hover:underline flex items-center gap-1"><i class="fa-solid fa-mobile-screen-button"></i>Instalar App</button>
         </div>
-        <div class="border-t border-slate-200 my-5"></div>
-        <h3 class="font-bold mb-3">Crear cuenta nueva</h3>
-        <form onsubmit="register(event)" class="grid grid-cols-2 gap-2">
-          <input name="name" required placeholder="Nombre completo" class="inp col-span-2">
-          <select name="role" class="inp">${['familia', 'tecnico', 'estudiante', 'reciclador'].map(r => `<option value="${r}">${ROLES[r].n}</option>`).join('')}</select>
-          <select name="loc" class="inp">${locOpts('Chapinero')}</select>
-          <details class="col-span-2 text-sm"><summary class="cursor-pointer text-slate-500">Intereses (para el matchmaking IA)</summary>
-            <div class="grid grid-cols-2 gap-1 mt-2">${Object.entries(CATS).filter(([, c]) => !c.toxic).map(([k, c]) => `<label class="flex items-center gap-2"><input type="checkbox" name="interests" value="${k}">${c.n}</label>`).join('')}</div></details>
-          <button class="btn btn-primary col-span-2 mt-1"><i class="fa-solid fa-user-plus"></i>Crear cuenta (+100 EcoCoins)</button>
-        </form>
+      </div>
+      <div class="p-8 md:p-10 flex flex-col justify-center">
+        <div class="flex rounded-xl bg-slate-100 p-1 mb-6">
+          <button type="button" onclick="setAuthMode('login')" class="flex-1 py-2.5 text-sm font-bold rounded-lg transition ${isLogin ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}"><i class="fa-solid fa-right-to-bracket mr-1.5"></i>Iniciar sesión</button>
+          <button type="button" onclick="setAuthMode('register')" class="flex-1 py-2.5 text-sm font-bold rounded-lg transition ${!isLogin ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}"><i class="fa-solid fa-user-plus mr-1.5"></i>Crear cuenta</button>
+        </div>
+
+        ${isLogin ? `
+          <h2 class="text-2xl font-extrabold mb-1">Bienvenido de nuevo</h2>
+          <p class="text-sm text-slate-500 mb-5">Ingresa con tu correo electrónico y contraseña.</p>
+          <form onsubmit="handleSignIn(event)" class="space-y-4">
+            <div>
+              <label class="lbl">Correo electrónico</label>
+              <div class="relative"><i class="fa-solid fa-envelope absolute left-3.5 top-3.5 text-slate-400"></i><input name="email" type="email" required autocomplete="email" placeholder="nombre@correo.com" class="inp pl-10"></div>
+            </div>
+            <div>
+              <label class="lbl">Contraseña</label>
+              <div class="relative"><i class="fa-solid fa-lock absolute left-3.5 top-3.5 text-slate-400"></i><input name="password" type="password" required autocomplete="current-password" placeholder="••••••••" class="inp pl-10"></div>
+            </div>
+            <button id="auth-submit-btn" class="btn btn-primary w-full py-3"><i class="fa-solid fa-right-to-bracket"></i>Iniciar sesión</button>
+          </form>
+          <p class="text-xs text-center text-slate-500 mt-6">¿Aún no tienes cuenta? <button type="button" onclick="setAuthMode('register')" class="text-emerald-700 font-bold hover:underline">Regístrate gratis (+100 EcoCoins)</button></p>
+        ` : `
+          <h2 class="text-2xl font-extrabold mb-1">Crear cuenta en Eco Swap</h2>
+          <p class="text-sm text-slate-500 mb-4">Únete al ecosistema de economía circular y recibe 🪙 100 EcoCoins.</p>
+          <form onsubmit="register(event)" class="grid grid-cols-2 gap-3">
+            <div class="col-span-2">
+              <label class="lbl">Nombre completo</label>
+              <input name="name" required placeholder="Ej: Juan Pérez" class="inp">
+            </div>
+            <div class="col-span-2">
+              <label class="lbl">Correo electrónico</label>
+              <input name="email" type="email" required autocomplete="email" placeholder="nombre@correo.com" class="inp">
+            </div>
+            <div class="col-span-2">
+              <label class="lbl">Contraseña</label>
+              <input name="password" type="password" minlength="6" required autocomplete="new-password" placeholder="Mínimo 6 caracteres" class="inp">
+            </div>
+            <div>
+              <label class="lbl">Rol en el ecosistema</label>
+              <select name="role" class="inp" onchange="document.getElementById('reg-hub-wrap').style.display=this.value==='operador'?'block':'none'">${['familia', 'tecnico', 'estudiante', 'reciclador', 'operador'].map(r => `<option value="${r}">${ROLES[r].n}</option>`).join('')}</select>
+            </div>
+            <div>
+              <label class="lbl">Localidad (Bogotá)</label>
+              <select name="loc" class="inp">${locOpts('Chapinero')}</select>
+            </div>
+            <div id="reg-hub-wrap" style="display:none" class="col-span-2">
+              <label class="lbl">Eco-Hub asignado</label>
+              <select name="hub" class="inp">${hubOpts('h1')}</select>
+            </div>
+            <details class="col-span-2 text-sm bg-slate-50 p-3 rounded-xl border border-slate-200">
+              <summary class="cursor-pointer font-semibold text-slate-600">Intereses (para el matchmaking IA)</summary>
+              <div class="grid grid-cols-2 gap-1.5 mt-2 text-xs">${Object.entries(CATS).filter(([, c]) => !c.toxic).map(([k, c]) => `<label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" name="interests" value="${k}">${c.n}</label>`).join('')}</div>
+            </details>
+            <button id="auth-submit-btn" class="btn btn-primary col-span-2 py-3 mt-1"><i class="fa-solid fa-user-plus"></i>Crear cuenta (+100 EcoCoins)</button>
+          </form>
+        `}
       </div>
     </div>
   </div>`;
@@ -469,33 +757,165 @@ function sugCard(s) {
 }
 
 /* ------------------------------ ESCANEAR ---------------------------- */
-VIEWS.escanear = u => sectionTitle('Escanear RAEE con IA', 'Toma una foto, describe el equipo y nuestro algoritmo estimará su valor en EcoCoins y su mejor destino.') + `
+VIEWS.escanear = u => sectionTitle('Escanear RAEE con IA', 'Toma una foto con tu celular o cámara web, y nuestra IA reconocerá el dispositivo, estimará su valor en EcoCoins y su mejor destino.') + `
   <div class="grid lg:grid-cols-2 gap-6">
     <form id="scan-form" onsubmit="analizar(event)" class="card p-6 space-y-4">
       <div>
-        <label class="lbl">Foto del equipo</label>
+        <div class="flex items-center justify-between mb-1">
+          <label class="lbl mb-0">Foto del equipo</label>
+          <div class="flex gap-2">
+            <button type="button" onclick="openCameraModal()" class="text-xs font-semibold text-emerald-700 hover:underline flex items-center gap-1"><i class="fa-solid fa-video"></i>Cámara en vivo</button>
+            <button type="button" onclick="configGeminiKey()" class="text-xs text-slate-400 hover:text-violet-600 flex items-center gap-1" title="Configurar Gemini Vision API"><i class="fa-solid fa-key"></i>Gemini IA</button>
+          </div>
+        </div>
         <label class="block border-2 border-dashed border-slate-300 rounded-2xl cursor-pointer hover:border-emerald-500 overflow-hidden relative" id="photo-box">
-          <div id="photo-preview" class="h-48 flex flex-col items-center justify-center text-slate-400"><i class="fa-solid fa-camera text-4xl mb-2"></i><span class="text-sm">Toca para tomar / subir foto</span></div>
+          <div id="photo-preview" class="h-48 flex flex-col items-center justify-center text-slate-400"><i class="fa-solid fa-camera text-4xl mb-2 text-emerald-600"></i><span class="text-sm font-semibold text-slate-600">Toca para tomar foto o subir imagen</span><span class="text-xs text-slate-400 mt-0.5">Reconocimiento visual automático con IA</span></div>
           <input type="file" accept="image/*" capture="environment" class="hidden" onchange="loadPhoto(this)">
         </label>
+        <div id="ai-vision-status" class="hidden mt-2 text-xs rounded-xl px-3 py-2 flex items-center gap-2"></div>
       </div>
       <div class="grid grid-cols-2 gap-3">
-        <div class="col-span-2"><label class="lbl">Tipo de equipo</label><select name="cat" class="inp" onchange="document.getElementById('bat-row').style.display=this.value==='bateria'?'flex':'none'">${opts(CATS, 'laptop')}</select></div>
-        <div class="col-span-2"><label class="lbl">Título</label><input name="title" class="inp" required placeholder="Ej: Portátil HP con teclado dañado"></div>
-        <div><label class="lbl">Marca</label><input name="brand" class="inp" placeholder="HP, Lenovo..."></div>
-        <div><label class="lbl">Año aprox.</label><input name="year" type="number" min="1990" max="${new Date().getFullYear()}" value="2018" class="inp"></div>
+        <div class="col-span-2"><label class="lbl">Tipo de equipo</label><select name="cat" id="scan-cat" class="inp" onchange="document.getElementById('bat-row').style.display=this.value==='bateria'?'flex':'none'">${opts(CATS, 'laptop')}</select></div>
+        <div class="col-span-2"><label class="lbl">Título</label><input name="title" id="scan-title" class="inp" required placeholder="Ej: Portátil HP con teclado dañado"></div>
+        <div><label class="lbl">Marca</label><input name="brand" id="scan-brand" class="inp" placeholder="HP, Lenovo..."></div>
+        <div><label class="lbl">Año aprox.</label><input name="year" id="scan-year" type="number" min="1990" max="${new Date().getFullYear()}" value="2020" class="inp"></div>
       </div>
       <div><label class="lbl">Estado</label>
         <div class="grid grid-cols-3 gap-2">${Object.entries(CONDS).map(([k, c], i) => `<label class="border border-slate-200 rounded-xl p-2 text-center text-xs cursor-pointer has-[:checked]:border-emerald-500 has-[:checked]:bg-emerald-50"><input type="radio" name="cond" value="${k}" ${i === 0 ? 'checked' : ''} class="hidden">${c.n}</label>`).join('')}</div>
       </div>
       <label id="bat-row" style="display:none" class="items-center gap-2 text-sm bg-rose-50 text-rose-700 p-3 rounded-xl"><input type="checkbox" name="hinchada"> La batería está hinchada, con fuga o caliente</label>
-      <div><label class="lbl">Descripción</label><textarea name="desc" rows="2" class="inp" placeholder="¿Qué falla? ¿Qué funciona?"></textarea></div>
+      <div><label class="lbl">Descripción</label><textarea name="desc" id="scan-desc" rows="2" class="inp" placeholder="¿Qué falla? ¿Qué funciona?"></textarea></div>
       <button class="btn btn-primary w-full"><i class="fa-solid fa-wand-magic-sparkles"></i>Analizar con IA</button>
     </form>
-    <div id="scan-result" class="card p-6 flex items-center justify-center">${empty('El resultado del análisis aparecerá aquí.', 'fa-robot')}</div>
+    <div id="scan-result" class="card p-6 flex items-center justify-center">${empty('Toma o sube una foto y presiona "Analizar con IA" para ver la valoración.', 'fa-robot')}</div>
   </div>`;
-let photoData = null;
-AFTER.escanear = () => { photoData = null; };
+let photoData = null, camStream = null;
+AFTER.escanear = () => { photoData = null; stopCam(); };
+
+function stopCam() {
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+}
+
+async function openCameraModal() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return toast('Tu navegador no soporta cámara en vivo. Usa el recuadro para subir o tomar foto.', 'warn');
+  }
+  openModal(`<h2 class="text-xl font-bold mb-3"><i class="fa-solid fa-camera text-emerald-600 mr-2"></i>Cámara en vivo</h2>
+    <div class="rounded-2xl overflow-hidden bg-slate-900 relative aspect-video flex items-center justify-center">
+      <video id="cam-video" autoplay playsinline class="w-full h-full object-cover"></video>
+    </div>
+    <div class="flex gap-2 mt-4">
+      <button type="button" onclick="stopCam();closeModal()" class="btn btn-ghost flex-1">Cancelar</button>
+      <button type="button" onclick="captureFromCamera()" class="btn btn-primary flex-1"><i class="fa-solid fa-camera"></i>Capturar foto</button>
+    </div>`);
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    const v = $('#cam-video');
+    if (v) v.srcObject = camStream;
+  } catch (e) {
+    closeModal();
+    toast('No se pudo acceder a la cámara. Revisa los permisos del navegador.', 'err');
+  }
+}
+
+function captureFromCamera() {
+  const v = $('#cam-video');
+  if (!v || !v.videoWidth) return;
+  const max = 480, sc = Math.min(1, max / Math.max(v.videoWidth, v.videoHeight));
+  const cv = document.createElement('canvas'); cv.width = v.videoWidth * sc; cv.height = v.videoHeight * sc;
+  cv.getContext('2d').drawImage(v, 0, 0, cv.width, cv.height);
+  photoData = cv.toDataURL('image/jpeg', 0.72);
+  stopCam();
+  closeModal();
+  const prev = $('#photo-preview');
+  if (prev) prev.outerHTML = `<div id="photo-preview" class="relative"><img src="${photoData}" class="w-full h-48 object-cover"></div>`;
+  autoRecognizePhoto(photoData, 'captura_camara.jpg');
+}
+
+function configGeminiKey() {
+  const cur = localStorage.getItem(GEMINI_KEY_STORAGE) || '';
+  openModal(`<h2 class="text-xl font-bold mb-2"><i class="fa-solid fa-wand-magic-sparkles text-violet-600 mr-2"></i>Reconocimiento con Google Gemini Vision</h2>
+    <p class="text-sm text-slate-600 mb-3">Si ingresas una API Key de Google AI Studio (Gemini), al tomar una foto la IA identificará automáticamente el tipo de RAEE, marca, título y estado físico real desde la imagen.</p>
+    <input id="gemini-key-inp" type="password" value="${esc(cur)}" placeholder="AIzaSy..." class="inp mb-4">
+    <div class="flex gap-2">
+      <button type="button" onclick="closeModal()" class="btn btn-ghost flex-1">Cancelar</button>
+      <button type="button" onclick="localStorage.setItem(GEMINI_KEY_STORAGE, document.getElementById('gemini-key-inp').value.trim());closeModal();toast('Configuración de Gemini IA guardada','ok')" class="btn btn-primary flex-1">Guardar</button>
+    </div>`);
+}
+
+async function autoRecognizePhoto(dataUrl, fileName = '') {
+  const st = $('#ai-vision-status');
+  if (st) {
+    st.className = 'mt-2 text-xs rounded-xl px-3 py-2 flex items-center gap-2 bg-violet-50 text-violet-700 border border-violet-200';
+    st.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Analizando imagen con visión artificial…</span>';
+  }
+  const apiKey = localStorage.getItem(GEMINI_KEY_STORAGE);
+  if (apiKey) {
+    try {
+      const base64 = dataUrl.split(',')[1];
+      const prompt = 'Analiza esta foto de un residuo o equipo electrónico (RAEE). Responde SOLO un objeto JSON válido con las claves: {"cat": una de [laptop, pc, monitor, celular, tablet, ram, disco, placa, fuente, perifericos, cables, bateria, toner], "title": nombre corto descriptivo en español, "brand": marca detectada o "", "year": año estimado número entre 2010 y 2025, "cond": uno de [funcional, reparable, danado], "desc": breve descripción del estado visual en español}.';
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: 'image/jpeg', data: base64 } }] }],
+          generationConfig: { responseMimeType: 'application/json' }
+        })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const txt = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const parsed = JSON.parse(txt.replace(/```json|```/g, '').trim());
+        applyVisionFields(parsed, 'Gemini Vision IA');
+        return;
+      }
+    } catch (e) {}
+  }
+  const fn = fileName.toLowerCase();
+  const hints = [
+    [/portatil|laptop|macbook|ideapad|thinkpad|pavilion/, 'laptop', 'Portátil para revisión / repuestos', 'Lenovo'],
+    [/celular|iphone|galaxy|redmi|moto|telefono|phone/, 'celular', 'Smartphone para reacondicionamiento', 'Samsung'],
+    [/monitor|pantalla|lg|acer|benq/, 'monitor', 'Monitor LED de escritorio', 'LG'],
+    [/teclado|mouse|raton|periferico|logitech|genius/, 'perifericos', 'Periférico USB', 'Logitech'],
+    [/ram|kingston|corsair|ddr/, 'ram', 'Módulo de memoria RAM', 'Kingston'],
+    [/ssd|disco|hdd|seagate|wd/, 'disco', 'Unidad de almacenamiento', 'Kingston'],
+    [/placa|board|motherboard|asus|gigabyte/, 'placa', 'Tarjeta electrónica / PCB', 'Gigabyte'],
+    [/bateria|pila/, 'bateria', 'Batería de litio usada', 'Genérica'],
+    [/tablet|ipad/, 'tablet', 'Tablet táctil', 'Samsung']
+  ];
+  for (const [rx, cat, title, brand] of hints) {
+    if (rx.test(fn)) {
+      applyVisionFields({ cat, title, brand, year: 2020, cond: 'reparable', desc: 'Equipo identificado a partir de la imagen cargada.' }, 'Asistente IA');
+      return;
+    }
+  }
+  if (st) {
+    st.className = 'mt-2 text-xs rounded-xl px-3 py-2 flex items-center gap-2 bg-emerald-50 text-emerald-700 border border-emerald-200';
+    st.innerHTML = '<i class="fa-solid fa-circle-check"></i><span>Imagen lista y optimizada. Completa los datos o presiona Analizar con IA.</span>';
+  }
+}
+
+function applyVisionFields(p, source) {
+  if (p.cat && CATS[p.cat] && $('#scan-cat')) {
+    $('#scan-cat').value = p.cat;
+    const batRow = document.getElementById('bat-row');
+    if (batRow) batRow.style.display = p.cat === 'bateria' ? 'flex' : 'none';
+  }
+  if (p.title && $('#scan-title') && !$('#scan-title').value) $('#scan-title').value = p.title;
+  if (p.brand && $('#scan-brand') && !$('#scan-brand').value) $('#scan-brand').value = p.brand;
+  if (p.year && $('#scan-year')) $('#scan-year').value = p.year;
+  if (p.desc && $('#scan-desc') && !$('#scan-desc').value) $('#scan-desc').value = p.desc;
+  if (p.cond && CONDS[p.cond]) {
+    const rad = document.querySelector(`input[name="cond"][value="${p.cond}"]`);
+    if (rad) rad.checked = true;
+  }
+  const st = $('#ai-vision-status');
+  if (st) {
+    st.className = 'mt-2 text-xs rounded-xl px-3 py-2 flex items-center gap-2 bg-emerald-50 text-emerald-700 border border-emerald-200';
+    st.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i><span><b>${esc(source)}:</b> Detectado como <b>${esc(CATS[p.cat]?.n || 'RAEE')}</b>. Revisa y presiona Analizar.</span>`;
+  }
+}
+
 function loadPhoto(input) {
   const f = input.files[0]; if (!f) return;
   const r = new FileReader();
@@ -505,8 +925,9 @@ function loadPhoto(input) {
       const max = 480, sc = Math.min(1, max / Math.max(img.width, img.height));
       const cv = document.createElement('canvas'); cv.width = img.width * sc; cv.height = img.height * sc;
       cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
-      photoData = cv.toDataURL('image/jpeg', 0.7);
+      photoData = cv.toDataURL('image/jpeg', 0.72);
       $('#photo-preview').outerHTML = `<div id="photo-preview" class="relative"><img src="${photoData}" class="w-full h-48 object-cover"></div>`;
+      autoRecognizePhoto(photoData, f.name || '');
     };
     img.src = e.target.result;
   };
