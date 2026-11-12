@@ -136,6 +136,8 @@ function save() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     try {
+      const { data: s } = await sb.auth.getSession();
+      if (!s || !s.session) return;
       const { error } = await sb.from('ecoswap_state').upsert({ id: 'main', data: db, updated_at: new Date().toISOString() });
       if (!error) setSyncBadge('online');
     } catch (e) {}
@@ -224,7 +226,7 @@ function recomendados(u, limit = 4) {
 }
 
 /* ------------------------------ SEMILLA ----------------------------- */
-function seed() {
+function seed(persist = true) {
   const now = Date.now(), D = 86400000;
   db = {
     seq: 1000, items: [], orders: [], offers: [], txs: [], certs: [], prints: [], notifs: [], quiz: {},
@@ -278,7 +280,8 @@ function seed() {
   hist.forEach(([u, c, d, kg]) => mk(u, c, CATS[c].n + ' (histórico)', '—', 2015, d === 'trueque' ? 'reparable' : 'danado', 'procesado', { finalDest: d, kg, processedAt: now - Math.random() * 20 * D, hub: 'h1' }));
   db.users.filter(u => u.id !== SYS).forEach(u => db.txs.push({ id: nid('t'), from: SYS, to: u.id, amount: 100, concept: 'Bono de bienvenida', date: now - 25 * D }));
   db.certs.push({ id: 'CERT-2026-0001', item: 'histórico', itemTitle: 'Disco duro 500GB', user: 'u3', hub: 'h1', method: 'NIST SP 800-88 Rev.1 (Purge)', operator: 'Operador Hub Andino', date: now - 9 * D });
-  save();
+  if (persist) save();
+  else { try { localStorage.setItem(DB_KEY, JSON.stringify(db)); } catch (e) {} }
 }
 
 /* ------------------------------ ARRANQUE ---------------------------- */
@@ -349,7 +352,7 @@ async function resolveProfileForAuthUser(authUser, extraMeta = {}) {
 
 async function boot() {
   try { db = JSON.parse(localStorage.getItem(DB_KEY)); } catch (e) { db = null; }
-  if (!db || !db.users) seed();
+  if (!db || !db.users) seed(false);
 
   if (sb) {
     try {
@@ -358,7 +361,7 @@ async function boot() {
         db = row.data;
         try { localStorage.setItem(DB_KEY, JSON.stringify(db)); } catch (e) {}
       } else {
-        seed();
+        seed(true);
       }
       setSyncBadge('online');
       subscribeRealtime();
@@ -501,7 +504,7 @@ function openModal(html, wide = false) {
       <button onclick="closeModal()" class="absolute top-4 right-4 text-slate-400 hover:text-slate-700"><i class="fa-solid fa-xmark text-xl"></i></button>
       ${html}</div></div>`;
 }
-function closeModal() { $('#modal-root').innerHTML = ''; }
+function closeModal() { stopCam(); $('#modal-root').innerHTML = ''; }
 
 /* --------------------------- UI: helpers ---------------------------- */
 function avatar(u, size = 'w-10 h-10 text-sm') {
@@ -1388,7 +1391,7 @@ VIEWS.billetera = u => {
       <div class="rounded-3xl bg-gradient-to-br from-slate-900 to-emerald-800 text-white p-6">
         <div class="text-sm opacity-70">Saldo disponible</div><div class="text-4xl font-extrabold mt-1">🪙 ${fmt(u.coins)}</div>
         <div class="flex gap-6 mt-6 text-sm"><div><div class="opacity-70 text-xs">Ingresos</div><div class="font-bold text-emerald-300">+${fmt(inc)}</div></div><div><div class="opacity-70 text-xs">Egresos</div><div class="font-bold text-rose-300">−${fmt(out)}</div></div></div>
-        <div class="text-[10px] opacity-50 mt-4">ID billetera: ECO-${u.id.toUpperCase()}-${btoa(u.name).slice(0, 6).toUpperCase()}</div>
+        <div class="text-[10px] opacity-50 mt-4">ID billetera: ECO-${u.id.toUpperCase()}-${btoa(encodeURIComponent(u.name)).replace(/[^A-Z0-9]/gi, '').slice(0, 6).toUpperCase()}</div>
       </div>
       <form onsubmit="transferir(event)" class="card p-5 space-y-3"><h2 class="font-bold"><i class="fa-solid fa-paper-plane text-emerald-600 mr-2"></i>Transferir EcoCoins</h2>
         <select name="to" class="inp">${db.users.filter(x => x.id !== u.id && !['sistema', 'operador'].includes(x.role)).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
