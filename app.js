@@ -9,6 +9,9 @@ const DB_KEY = 'ecoswap_db_v4';
 const SESSION_KEY = 'ecoswap_session_v4';
 const GEMINI_KEY_STORAGE = 'ecoswap_gemini_key';
 const SYS = 'u0'; // usuario "Eco Swap" (sistema / Eco-Hubs)
+const ADMIN_IDS = ['u3', 'u5', 'u6', 'u7', 'u8'];
+const isAdmin = u => !!(u && (u.role === 'operador' || ADMIN_IDS.includes(u.id)));
+const NON_RAEE_RX = /\b(calcetin|calcetines|media|medias|zapato|zapatos|tenis|camisa|camiseta|pantalon|ropa|interior|calzon|comida|pizza|hamburguesa|perro|gato|mascota|planta|silla|mesa|cama|colchon|pelota|balon|juguete|basura\s*organica|papel\s*higienico)\b/i;
 
 const SUPABASE_URL = 'https://zsjjgomptpomxzljntcc.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpzampnb21wdHBvbXh6bGpudGNjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ0MzU1OTksImV4cCI6MjExMDAxMTU5OX0.KnSXnw_Tl31G4g71QZaK1uyB1j1_Sv5hVoaaJS7szqQ';
@@ -856,7 +859,7 @@ async function autoRecognizePhoto(dataUrl, fileName = '') {
   if (apiKey) {
     try {
       const base64 = dataUrl.split(',')[1];
-      const prompt = 'Analiza esta foto de un residuo o equipo electrónico (RAEE). Responde SOLO un objeto JSON válido con las claves: {"cat": una de [laptop, pc, monitor, celular, tablet, ram, disco, placa, fuente, perifericos, cables, bateria, toner], "title": nombre corto descriptivo en español, "brand": marca detectada o "", "year": año estimado número entre 2010 y 2025, "cond": uno de [funcional, reparable, danado], "desc": breve descripción del estado visual en español}.';
+      const prompt = 'Analiza esta foto. Primero verifica si es un residuo o equipo eléctrico/electrónico (RAEE). Responde SOLO un objeto JSON válido con las claves: {"isRaee": true o false, "cat": una de [laptop, pc, monitor, celular, tablet, ram, disco, placa, fuente, perifericos, cables, bateria, toner], "title": nombre corto descriptivo en español, "brand": marca detectada o "", "year": año estimado número entre 2010 y 2025, "cond": uno de [funcional, reparable, danado], "desc": breve descripción del estado visual en español}.';
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -869,6 +872,14 @@ async function autoRecognizePhoto(dataUrl, fileName = '') {
         const json = await res.json();
         const txt = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
         const parsed = JSON.parse(txt.replace(/```json|```/g, '').trim());
+        if (parsed.isRaee === false) {
+          if (st) {
+            st.className = 'mt-2 text-xs rounded-xl px-3 py-2 flex items-center gap-2 bg-rose-50 text-rose-700 border border-rose-200';
+            st.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i><span><b>Alerta IA:</b> La imagen parece ser "${esc(parsed.title || 'un objeto no electrónico')}" y no un RAEE válido.</span>`;
+          }
+          toast('Ese objeto no parece ser un residuo electrónico (RAEE)', 'warn');
+          return;
+        }
         applyVisionFields(parsed, 'Gemini Vision IA');
         return;
       }
@@ -940,6 +951,19 @@ function analizar(e) {
   e.preventDefault();
   const f = new FormData(e.target);
   const d = { cat: f.get('cat'), title: f.get('title').trim(), brand: f.get('brand').trim(), year: f.get('year'), cond: f.get('cond'), hinchada: !!f.get('hinchada') && f.get('cat') === 'bateria', desc: f.get('desc').trim(), photo: photoData };
+  const norm = (d.title + ' ' + d.brand + ' ' + d.desc).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (NON_RAEE_RX.test(norm)) {
+    const box = $('#scan-result');
+    if (box) {
+      box.className = 'card p-6 fade-in border-rose-200 bg-rose-50/40';
+      box.innerHTML = `<div class="text-center py-6">
+        <div class="w-16 h-16 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center text-3xl mx-auto mb-3"><i class="fa-solid fa-ban"></i></div>
+        <h3 class="font-extrabold text-lg text-rose-700">Publicación rechazada por moderación IA</h3>
+        <p class="text-sm text-slate-600 mt-2"><b>"${esc(d.title)}"</b> no corresponde a un Residuo de Aparato Eléctrico o Electrónico (RAEE). En Eco Swap solo se permiten equipos, componentes y periféricos tecnológicos.</p>
+      </div>`;
+    }
+    return toast('Rechazado: el objeto no es un residuo electrónico (RAEE)', 'err');
+  }
   const box = $('#scan-result');
   const steps = ['Reconociendo el objeto en la imagen…', 'Estimando estado y antigüedad…', 'Consultando precios de repuestos…', 'Calculando EcoCoins y destino óptimo…'];
   box.innerHTML = `<div class="w-full"><div class="relative h-40 rounded-2xl overflow-hidden mb-4 bg-slate-900">${d.photo ? `<img src="${d.photo}" class="w-full h-full object-cover opacity-70">` : `<div class="w-full h-full flex items-center justify-center"><i class="fa-solid ${CATS[d.cat].icon} text-6xl text-emerald-400"></i></div>`}<div class="scan-line"></div></div><p id="scan-step" class="text-center text-sm text-slate-600"><i class="fa-solid fa-spinner fa-spin mr-2"></i>${steps[0]}</p></div>`;
@@ -997,7 +1021,7 @@ VIEWS.mercado = u => {
 };
 AFTER.mercado = () => renderMarket();
 function renderMarket() {
-  const u = me(), m = ui.market, q = m.q.toLowerCase();
+  const u = me(), adm = isAdmin(u), m = ui.market, q = m.q.toLowerCase();
   const list = db.items.filter(i => i.status === 'mercado'
     && (!m.cat || i.cat === m.cat) && (!m.cond || i.cond === m.cond)
     && (!m.hideMine || i.owner !== u.id)
@@ -1007,20 +1031,23 @@ function renderMarket() {
   el.innerHTML = list.length ? `<div class="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">${list.map(i => {
     const o = user(i.owner), mine = i.owner === u.id;
     return `<div class="card overflow-hidden flex flex-col hover:shadow-lg transition">
-      <button onclick="itemDetail('${i.id}')" class="relative">${thumb(i)}${mine ? '<span class="absolute top-2 left-2 bg-slate-900/80 text-white text-[10px] px-2 py-0.5 rounded-full">Tuyo</span>' : ''}${i.owner === SYS ? '<span class="absolute top-2 left-2 bg-emerald-600 text-white text-[10px] px-2 py-0.5 rounded-full"><i class="fa-solid fa-certificate mr-1"></i>Reacondicionado Eco-Hub</span>' : ''}</button>
+      <div class="relative">
+        <button onclick="itemDetail('${i.id}')" class="w-full block text-left">${thumb(i)}${mine ? '<span class="absolute top-2 left-2 bg-slate-900/80 text-white text-[10px] px-2 py-0.5 rounded-full">Tuyo</span>' : ''}${i.owner === SYS ? '<span class="absolute top-2 left-2 bg-emerald-600 text-white text-[10px] px-2 py-0.5 rounded-full"><i class="fa-solid fa-certificate mr-1"></i>Reacondicionado Eco-Hub</span>' : ''}</button>
+        ${adm ? `<button onclick="eliminarPublicacion('${i.id}')" class="absolute top-2 right-2 w-8 h-8 rounded-full bg-rose-600/90 hover:bg-rose-700 text-white text-xs flex items-center justify-center shadow" title="Moderación Admin: Eliminar publicación"><i class="fa-solid fa-trash-can"></i></button>` : ''}
+      </div>
       <div class="p-4 flex-1 flex flex-col">
         <div class="text-[11px] text-slate-500">${CATS[i.cat].n}</div>
         <button onclick="itemDetail('${i.id}')" class="font-bold text-left leading-tight hover:text-emerald-700">${esc(i.title)}</button>
         <div class="mt-1">${condBadge(i.cond)}</div>
         <div class="flex items-center gap-2 mt-3 text-xs text-slate-500">${avatar(o, 'w-6 h-6 text-[9px]')}<span class="truncate">${esc(o.name)} · ${esc(o.loc)}</span></div>
         <div class="mt-auto pt-3 flex items-center justify-between">${coin(i.value)}
-          ${mine ? `<button onclick="retirar('${i.id}')" class="btn btn-sm btn-ghost">Retirar</button>` : u.role === 'operador' ? '' : `<div class="flex gap-1"><button onclick="proponerTrueque('${i.id}')" class="btn btn-sm btn-ghost" title="Proponer trueque"><i class="fa-solid fa-right-left"></i></button><button onclick="adquirir('${i.id}')" class="btn btn-sm btn-primary">Adquirir</button></div>`}
+          ${mine ? `<button onclick="retirar('${i.id}')" class="btn btn-sm btn-ghost">Retirar</button>` : u.role === 'operador' ? `<button onclick="eliminarPublicacion('${i.id}')" class="btn btn-sm btn-danger"><i class="fa-solid fa-trash-can"></i>Borrar</button>` : `<div class="flex gap-1"><button onclick="proponerTrueque('${i.id}')" class="btn btn-sm btn-ghost" title="Proponer trueque"><i class="fa-solid fa-right-left"></i></button><button onclick="adquirir('${i.id}')" class="btn btn-sm btn-primary">Adquirir</button></div>`}
         </div>
       </div></div>`;
   }).join('')}</div>` : `<div class="card">${empty('No hay objetos con esos filtros.')}</div>`;
 }
 function itemDetail(id) {
-  const i = item(id), u = me(), o = user(i.owner), mine = i.owner === u.id;
+  const i = item(id), u = me(), o = user(i.owner), mine = i.owner === u.id, adm = isAdmin(u);
   openModal(`<div class="grid md:grid-cols-2 gap-6">
     <div class="rounded-2xl overflow-hidden">${thumb(i, 'w-full h-64')}</div>
     <div>
@@ -1032,7 +1059,23 @@ function itemDetail(id) {
       <div class="text-3xl font-extrabold text-emerald-700 mt-4">🪙 ${fmt(i.value)}</div>
       <div class="text-xs text-slate-500">≈ ${fmt1(i.kg)} kg de RAEE con segunda vida · ${fmt(i.kg * 30)} kg CO₂e evitados (est.)</div>
       ${i.status === 'mercado' && !mine && u.role !== 'operador' ? `<div class="flex gap-2 mt-5"><button onclick="adquirir('${i.id}')" class="btn btn-primary flex-1"><i class="fa-solid fa-bag-shopping"></i>Adquirir</button><button onclick="proponerTrueque('${i.id}')" class="btn btn-ghost flex-1"><i class="fa-solid fa-right-left"></i>Trueque</button></div>` : ''}
+      ${adm ? `<button onclick="eliminarPublicacion('${i.id}')" class="btn btn-danger w-full mt-3"><i class="fa-solid fa-trash-can"></i>Eliminar publicación (Moderación Admin)</button>` : ''}
     </div></div>`, true);
+}
+function eliminarPublicacion(id) {
+  const u = me();
+  if (!isAdmin(u)) return toast('No tienes permisos de moderador', 'err');
+  const i = item(id);
+  if (!i) return;
+  if (!confirm(`¿Eliminar definitivamente "${i.title}" por no cumplir las normas de RAEE?`)) return;
+  db.items = db.items.filter(x => x.id !== id);
+  db.offers.filter(o => o.status === 'pendiente' && (o.give === id || o.get === id)).forEach(o => o.status = 'cancelada');
+  db.orders.forEach(o => { o.items = o.items.filter(x => x !== id); });
+  db.orders = db.orders.filter(o => o.items.length > 0);
+  if (i.owner && i.owner !== SYS && i.owner !== u.id) {
+    notify(i.owner, `Tu publicación "${esc(i.title)}" fue eliminada por moderación (no corresponde a un RAEE válido).`, 'fa-ban');
+  }
+  save(); closeModal(); toast('Publicación eliminada por moderación', 'info'); render();
 }
 function adquirir(id) {
   const i = item(id), u = me();
@@ -1293,7 +1336,10 @@ VIEWS.hub = u => {
         <div class="md:col-span-2"><label class="lbl">Peso real (kg)</label><input id="kg-${i.id}" type="number" step="0.05" min="0.01" value="${i.kg}" class="inp text-xs"></div>
         <div class="md:col-span-3 flex flex-col gap-2">
           ${i.hasData ? `<label class="text-xs flex items-center gap-2 bg-sky-50 text-sky-800 p-2 rounded-lg"><input type="checkbox" id="wipe-${i.id}">Borrado seguro NIST 800-88 realizado</label>` : ''}
-          <button onclick="procesar('${i.id}')" class="btn btn-sm btn-primary"><i class="fa-solid fa-check"></i>Procesar y pagar EcoCoins</button>
+          <div class="flex gap-2">
+            <button onclick="procesar('${i.id}')" class="btn btn-sm btn-primary flex-1"><i class="fa-solid fa-check"></i>Procesar</button>
+            <button onclick="eliminarPublicacion('${i.id}')" class="btn btn-sm btn-danger" title="Rechazar y eliminar (No es RAEE)"><i class="fa-solid fa-trash-can"></i></button>
+          </div>
         </div>
       </div>`).join('')}</div>` : empty('No hay equipos en cola. ¡Todo procesado!', 'fa-circle-check')}
   </div>
